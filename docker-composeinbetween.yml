@@ -33,21 +33,18 @@ services:
    # networks:
       #- keylime-network
   
-  keylime_agent:
+  keylime-agent:
     image: keylime_agent:latest-fedora
-    hostname: keylime-agent
-    user: root
+    hostname: 'keylime-agent'
     tmpfs:
-      - /var/lib/keylime/secure:size=1m,mode=0700
-    volumes:
-      - ./target/debug/:/rust-keylime
-      - ./entrypoint2.sh:/usr/local/bin/entrypoint.sh:ro
+      - /var/lib/keylime/secure:size=5m,mode=0700
+    networks:
+      - keylime-network
     environment:
-      - TCTI=mssim:port=2321 # https://github.com/tpm2-software/tpm2-tools/blob/master/man/common/tcti.md
+      - TCTI=tabrmd:              # TCTI=tabrmd:bus_type=system # TCTI=mssim:host=swtpm,port=2321 #Real TPM?:
       - RUST_BACKTRACE=1
-    ports:
-      - "9002:9002"
-    entrypoint: ["/bin/sh", "/usr/local/bin/entrypoint.sh"]
+    #depends_on:
+     # - swtpm  # Ensure Keylime Agent starts after swtpm
     
 networks:
   keylime-network:
