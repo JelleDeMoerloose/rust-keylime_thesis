@@ -43,7 +43,7 @@ services:
       - ./target/debug/:/rust-keylime
       - ./entrypoint2.sh:/usr/local/bin/entrypoint.sh:ro
     environment:
-      - TCTI=mssim:port=2321 # https://github.com/tpm2-software/tpm2-tools/blob/master/man/common/tcti.md
+      - TCTI=tabrmd:bus_type=system # https://github.com/tpm2-software/tpm2-tools/blob/master/man/common/tcti.md
       - RUST_BACKTRACE=1
     ports:
       - "9002:9002"
