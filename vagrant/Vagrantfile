@@ -1,0 +1,106 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+    # Use Ubuntu 22.04 as the base box
+    config.vm.box = "generic/ubuntu2204"
+    config.vm.hostname = "keylime-dev"
+  
+    # Configure libvirt provider
+    config.vm.provider "libvirt" do |libvirt|
+      libvirt.memory = 4096  # 4GB of RAM
+      libvirt.cpus   = 2     # 2 CPU cores
+      libvirt.driver = "kvm" # KVM acceleration
+    end
+  
+    # Forward Keylime ports for local access
+    config.vm.network "forwarded_port", guest: 9002, host: 9002 # Keylime agent
+    config.vm.network "forwarded_port", guest: 8881, host: 8881 # Keylime verifier
+    config.vm.network "forwarded_port", guest: 8891, host: 8891 # Keylime registrar
+    config.vm.network "forwarded_port", guest: 8890, host: 8890 # Keylime registrar (alt port)
+  
+    # Main provisioning script
+    config.vm.provision "shell", inline: <<-SHELL
+      #!/bin/bash
+      set -e  # Exit on error
+  
+      echo "=== Updating system packages ==="
+      apt-get update
+      apt-get upgrade -y
+  
+      echo "=== Installing Keylime build dependencies ==="
+      apt-get install -y \\
+        libclang-dev \\
+        libssl-dev \\
+        libtss2-dev \\
+        pkg-config \\
+        libzmq3-dev \\
+        coreutils \\
+        libssl3 \\
+        libtss2-esys-3.0.2-0 \\
+        libzmq5 \\
+        git \\
+        make \\
+        curl
+  
+      echo "=== Installing TPM Emulator & Tools ==="
+      apt-get install -y tpm2-tools swtpm
+  
+      echo "=== Installing Rust (via rustup) ==="
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      # Add Rust to the PATH for the current session + future sessions
+      source /root/.cargo/env
+      echo 'source $HOME/.cargo/env' >> /home/vagrant/.bashrc
+      chown vagrant:vagrant /home/vagrant/.bashrc
+  
+      echo "=== Installing Docker ==="
+      apt-get install -y \\
+        apt-transport-https \\
+        ca-certificates \\
+        gnupg \\
+        lsb-release
+  
+      # Add Docker's GPG key & repo
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      echo \\
+        "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \\
+        $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  
+      apt-get update
+      apt-get install -y docker-ce docker-ce-cli containerd.io
+      systemctl enable docker
+      systemctl start docker
+  
+      # Allow the 'vagrant' user to run Docker without sudo
+      usermod -aG docker vagrant
+  
+      echo "=== Installing Docker Compose plugin ==="
+      apt-get install -y docker-compose-plugin
+  
+      # Optional: Symlink for backward compatibility with 'docker-compose'
+      ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+  
+      echo "=== Cloning rust-keylime repository ==="
+      git clone https://github.com/keylime/rust-keylime.git /home/vagrant/rust-keylime
+      chown -R vagrant:vagrant /home/vagrant/rust-keylime
+  
+      echo "=== Creating Keylime directories ==="
+      mkdir -p /var/lib/keylime/secure
+      chmod 700 /var/lib/keylime/secure
+  
+      # Create directory for Docker Compose files
+      mkdir -p /home/vagrant/keylime-docker
+      chown -R vagrant:vagrant /home/vagrant/keylime-docker
+  
+      # Copy an example docker-compose.yml from the repo
+      if [ -f "/home/vagrant/rust-keylime/docker-compose.yml" ]; then
+        cp /home/vagrant/rust-keylime/docker-compose.yml /home/vagrant/keylime-docker/
+        chown vagrant:vagrant /home/vagrant/keylime-docker/docker-compose.yml
+      fi
+  
+      echo "=== Basic setup complete ==="
+      echo "To build Keylime: cd ~/rust-keylime && cargo build"
+      echo "To run the agent with debug logging: RUST_LOG=keylime_agent=trace cargo run --bin keylime_agent"
+    SHELL
+  end
+  
