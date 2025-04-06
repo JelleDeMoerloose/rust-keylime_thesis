@@ -36,16 +36,16 @@ services:
     image: keylime_agent:latest-fedora
     hostname: keylime-agent
     user: root
-    devices:
-      - "/dev/tpm0:/dev/tpm0"
-      - "/dev/tpmrm0:/dev/tpmrm0"
     tmpfs:
       - /var/lib/keylime/secure:size=1m,mode=0700
     volumes:
       - ./target/debug/:/rust-keylime
       - ./entrypoint2.sh:/usr/local/bin/entrypoint.sh:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      - TCTI=tabrmd:bus_type=system #TCTI=mssim:port=2321 # https://github.com/tpm2-software/tpm2-tools/blob/master/man/common/tcti.md
+      - TCTI=mssim:host=host.docker.internal,port=2321 # https://github.com/tpm2-software/tpm2-tools/blob/master/man/common/tcti.md
+      - TPM2TOOLS_TCTI="mssim:host=host.docker.internal,port=2321"
       - RUST_BACKTRACE=1
     ports:
       - "9002:9002"
