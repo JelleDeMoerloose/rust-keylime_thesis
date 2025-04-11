@@ -1,7 +1,7 @@
 # -*- mode: ruby -*-
-# vi: set ft=ruby : 
+# vi: set ft=ruby :
 
-# A small helper to load KEY=VALUE lines from .env into ENV hash
+# Load environment variables from .env
 env_file = File.join(File.dirname(__FILE__), '.env')
 if File.exist?(env_file)
   File.foreach(env_file) do |line|
@@ -13,14 +13,19 @@ if File.exist?(env_file)
 end
 
 Vagrant.configure("2") do |config|
+  # Use an Ubuntu 22.04 LTS box for compatibility with libvirt
   config.vm.box = "generic/ubuntu2204"
   config.vm.hostname = "keylime-dev"
 
   # Configure the libvirt provider
   config.vm.provider "libvirt" do |libvirt|
     libvirt.memory = 4096
-    libvirt.cpus   = 2
-    libvirt.driver = "kvm"
+    libvirt.cpus = 4
+    # Optional: Uncomment to set the CPU mode
+    # libvirt.cpu_mode = "host-passthrough"
+
+    # Optional: Uncomment to customize disk size
+    # libvirt.storage :file, :size => '40G'
   end
 
   # Forward Keylime ports if needed
@@ -38,6 +43,18 @@ Vagrant.configure("2") do |config|
     apt-get update -y
     apt-get upgrade -y
 
+    echo "=== Configuring systemd-resolved to use 8.8.8.8 ==="
+    # Set upstream DNS in /etc/systemd/resolved.conf
+    sudo sed -i 's/^#DNS=/DNS=8.8.8.8/' /etc/systemd/resolved.conf
+    # If you also want a fallback or domain search, set them here:
+    # sudo sed -i 's/^#FallbackDNS=/FallbackDNS=8.8.4.4/' /etc/systemd/resolved.conf
+    # Restart systemd-resolved to apply changes
+    systemctl restart systemd-resolved
+
+    echo "=== Symlinking /etc/resolv.conf to systemd-resolved's file ==="
+    rm -f /etc/resolv.conf
+    ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
+
     echo "=== Installing Keylime build dependencies ==="
     apt-get install -y \
       libclang-dev \
@@ -51,10 +68,12 @@ Vagrant.configure("2") do |config|
       libzmq5 \
       git \
       make \
+      skopeo \
+      jq \
       curl
 
     echo "=== Installing TPM Emulator & Tools ==="
-    apt-get install -y tpm2-tools swtpm
+    apt-get install -y tpm2-tools swtpm swtpm-tools
 
     echo "=== Installing Rust (via rustup) ==="
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -64,7 +83,7 @@ Vagrant.configure("2") do |config|
 
     echo "=== Installing Docker & Docker Compose ==="
     apt-get install -y apt-transport-https ca-certificates gnupg lsb-release
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
           https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
           > /etc/apt/sources.list.d/docker.list
@@ -74,15 +93,59 @@ Vagrant.configure("2") do |config|
     systemctl start docker
     usermod -aG docker vagrant
 
-    echo "=== Cloning rust-keylime repository ==="
-    # Use the environment variable we loaded from .env
-    if [ -z "$GITHUB_PAT" ]; then
-      echo "ERROR: GITHUB_PAT not set. Please define it in .env"
-      exit 1
+    echo "=== Setting Docker to use 8.8.8.8 for DNS ==="
+    mkdir -p /etc/docker
+    cat <<EOF >/etc/docker/daemon.json
+{
+  "dns": ["8.8.8.8", "8.8.4.4"]
+}
+EOF
+    systemctl restart docker
+
+    echo "=== Enabling IMA in GRUB ==="
+    sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="ima=on ima_policy=tcb /' /etc/default/grub
+    update-grub
+
+    echo "=== Starting software TPM emulator (swtpm) ==="
+    mkdir -p /tmp/tpmdir
+    chown vagrant:vagrant /tmp/tpmdir
+
+    # Initialize the TPM state directory
+    swtpm_setup --tpm2 --tpmstate /tmp/tpmdir \
+                --createek --decryption --create-ek-cert \
+                --create-platform-cert --display
+
+    # Start the swtpm daemon
+    swtpm socket --tpm2 --tpmstate dir=/tmp/tpmdir \
+                --flags startup-clear \
+                --ctrl type=tcp,port=2322,bindaddr=172.17.0.1 \
+                --server type=tcp,port=2321,bindaddr=172.17.0.1 \
+                --daemon
+    sleep 2  # Ensure swtpm is fully initialized
+    export TPM2TOOLS_TCTI="mssim:host=172.17.0.1,port=2321"
+
+    echo "=== Linking IMA policy to securityfs ==="
+    if mount | grep securityfs > /dev/null; then
+      echo "securityfs already mounted"
+    else
+      mount -t securityfs securityfs /sys/kernel/security
     fi
 
-    # Clone using the PAT from .env
-    git clone https://$GITHUB_PAT@github.com/JelleDeMoerloose/rust-keylime_thesis.git /home/vagrant/rust-keylime
+    echo "=== Reboot required to enable IMA ==="
+    (sleep 3 && reboot) &
+
+    echo "=== Cloning rust-keylime repository ==="
+    if [ -n "$GITHUB_TOKEN" ]; then
+      echo "Using token from environment (via .env)"
+      git clone https://$GITHUB_TOKEN@github.com/JelleDeMoerloose/rust-keylime_thesis.git /home/vagrant/rust-keylime
+    else
+      echo "No GITHUB_TOKEN set. Cloning publicly..."
+      git clone https://github.com/JelleDeMoerloose/rust-keylime_thesis.git /home/vagrant/rust-keylime
+    fi
     chown -R vagrant:vagrant /home/vagrant/rust-keylime
+
+    echo "=== Cloning Python Keylime repository ==="
+    git clone https://github.com/keylime/keylime.git /home/vagrant/python-keylime
+    chown -R vagrant:vagrant /home/vagrant/python-keylime
   SHELL
 end

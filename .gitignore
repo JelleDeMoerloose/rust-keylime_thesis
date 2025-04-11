@@ -9,5 +9,5 @@ tests/unzipped/__pycache__
 
 vagrant/.vagrant/
 
-
+.txt
 .env
