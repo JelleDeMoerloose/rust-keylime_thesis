@@ -120,7 +120,8 @@ Vagrant.configure("2") do |config|
     (sleep 3 && reboot) &
 
     echo "=== Cloning rust-keylime repository ==="
-    git clone https://github.com/keylime/rust-keylime.git
+    git clone https://github.com/JelleDeMoerloose/rust-keylime_thesis.git
+    
     chown -R vagrant:vagrant /home/vagrant/rust-keylime
     git clone https://github.com/keylime/keylime.git /home/vagrant/python-keylime
     chown -R vagrant:vagrant /home/vagrant/python-keylime
