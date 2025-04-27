@@ -1,0 +1,72 @@
+version: '3.6'
+
+services:
+  keylime-verifier:
+    image: keylime_verifier:latest
+    hostname: 'keylime-verifier'
+    user: root
+    volumes:
+      - verifier-data:/var/lib/keylime
+    ports:
+      - "8881:8881"
+    networks:
+      - keylime-network
+    command: [ "/usr/local/bin/keylime_verifier" ]
+
+  keylime-registrar:
+    image: keylime_registrar:latest
+    hostname: 'keylime-registrar'
+    user: root
+    volumes:
+      - verifier-data:/var/lib/keylime
+    ports:
+      - "8891:8891"
+      - "8890:8890"
+    networks:
+      - keylime-network
+    command: [ "/root/wait.sh", "/var/lib/keylime/cv_ca/client-cert.crt", "keylime_registrar" ]
+
+  keylime_agent:
+    image: keylime_agent:latest-fedora
+    hostname: keylime-agent
+    user: root
+    tmpfs:
+      - /var/lib/keylime/secure:size=1m,mode=0700
+    volumes:
+      - agent-data:/var/lib/keylime
+      - ./target/debug/:/rust-keylime
+      - ./entrypoint2.sh:/usr/local/bin/entrypoint.sh:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - TCTI=swtpm:host=swtpm,port=2321 # https://github.com/tpm2-software/tpm2-tools/blob/master/man/common/tcti.md
+      - TPM2TOOLS_TCTI="swtpm:host=swtpm,port=2321"
+      - RUST_BACKTRACE=1
+    ports:
+      - "9002:9002"
+    depends_on:
+      - swtpm
+    networks:
+      - keylime-network
+    #entrypoint: ["/bin/sh", "/usr/local/bin/entrypoint.sh"]
+
+  swtpm:
+    image: new_swtpm:latest
+    container_name: swtpm
+    hostname: swtpm
+    volumes:
+      - ./tpm_state/tpm:/tpm_state/tpm
+    networks:
+      - keylime-network
+    ports:
+      - "2321:2321"
+      - "2322:2322"
+    command: [ "socket", "--tpm2", "--tpmstate", "dir=/tpm_state/tpm", "--server", "type=tcp,port=2321,bindaddr=0.0.0.0", "--ctrl", "type=tcp,port=2322,bindaddr=0.0.0.0", "--flags", "not-need-init,startup-clear", "--log", "level=20" ]
+
+networks:
+  keylime-network:
+    driver: bridge
+
+volumes:
+  verifier-data:
+  agent-data:
