@@ -1,0 +1,136 @@
+# -*- mode: ruby -*- 
+# vi: set ft=ruby : 
+
+# A small helper to load KEY=VALUE lines from .env into ENV hash
+env_file = File.join(File.dirname(__FILE__), '.env')
+if File.exist?(env_file)
+  File.foreach(env_file) do |line|
+    line.strip!
+    next if line.start_with?('#') || line.empty?
+    key, value = line.split('=', 2)
+    ENV[key] = value
+  end
+end
+
+Vagrant.configure("2") do |config|
+  # Use an Ubuntu 22.04 LTS box for better compatibility with VirtualBox
+  config.vm.box = "generic/ubuntu2204"
+  config.vm.hostname = "keylime-dev"
+
+  # Configure the VirtualBox provider
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 6144
+    vb.cpus   = 5
+  end
+
+  # Forward Keylime ports if needed
+  config.vm.network "forwarded_port", guest: 9002, host: 9002
+  config.vm.network "forwarded_port", guest: 8881, host: 8881
+  config.vm.network "forwarded_port", guest: 8891, host: 8891
+  config.vm.network "forwarded_port", guest: 8890, host: 8890
+
+  # Provisioning shell script
+  config.vm.provision "shell", inline: <<-SHELL
+    #!/bin/bash
+    set -e
+
+    echo "=== Updating system packages ==="
+    apt-get update -y
+    apt-get upgrade -y
+
+    echo "=== Fixing DNS by setting nameserver 8.8.8.8 ==="
+    echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+
+    echo "=== Installing Keylime build dependencies ==="
+    apt-get install -y \
+      libclang-dev \
+      libssl-dev \
+      libtss2-dev \
+      pkg-config \
+      libzmq3-dev \
+      coreutils \
+      libssl3 \
+      libtss2-esys-3.0.2-0 \
+      libzmq5 \
+      git \
+      make \
+      skopeo \
+      jq \
+      curl
+
+    echo "=== Installing TPM Emulator & Tools ==="
+    apt-get install -y tpm2-tools swtpm swtpm-tools
+
+    echo "=== Installing Rust (via rustup) ==="
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source /root/.cargo/env
+    echo 'source $HOME/.cargo/env' >> /home/vagrant/.bashrc
+    chown vagrant:vagrant /home/vagrant/.bashrc
+
+    echo "=== Installing Docker & Docker Compose ==="
+    apt-get install -y apt-transport-https ca-certificates gnupg lsb-release
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
+          https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+          > /etc/apt/sources.list.d/docker.list
+    apt-get update -y
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    systemctl enable docker
+    systemctl start docker
+    usermod -aG docker vagrant
+
+    
+
+    echo "=== Enabling IMA in GRUB ==="
+    sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="ima=on ima_policy=tcb /' /etc/default/grub
+    update-grub
+
+    echo "=== Starting software TPM emulator (swtpm) ==="
+    # Create a directory for TPM state
+    
+    echo "Setting up swtpm (Software TPM)..."
+    mkdir -p /tmp/tpmdir
+    sudo chown vagrant:vagrant /tmp/tpmdir
+
+
+    # Initialize the TPM state directory
+    swtpm_setup --tpm2 --tpmstate /tmp/tpmdir \
+                --createek --decryption --create-ek-cert \
+                --create-platform-cert --display
+
+    # Start the swtpm daemon
+    echo "Starting swtpm daemon..."
+    swtpm socket --tpm2 --tpmstate dir=/tmp/tpmdir \
+                --flags startup-clear \
+                --ctrl type=tcp,port=2322,bindaddr=172.17.0.1 \
+                --server type=tcp,port=2321,bindaddr=172.17.0.1 \
+                --daemon
+    sleep 2  # Ensure swtpm is fully initialized
+    export TPM2TOOLS_TCTI="mssim:host=172.17.0.1,port=2321"
+
+    echo "=== Linking IMA policy to securityfs ==="
+    if mount | grep securityfs > /dev/null; then
+      echo "securityfs already mounted"
+    else
+      mount -t securityfs securityfs /sys/kernel/security
+    fi
+
+    echo "=== Reboot required to enable IMA ==="
+    # On first provision, we'll schedule a reboot so GRUB changes take effect
+    (sleep 3 && reboot) &
+
+    echo "=== Cloning rust-keylime repository ==="
+    git clone https://github.com/JelleDeMoerloose/rust-keylime_thesis.git
+    
+    chown -R vagrant:vagrant /home/vagrant/rust-keylime
+    git clone https://github.com/keylime/keylime.git /home/vagrant/python-keylime
+    chown -R vagrant:vagrant /home/vagrant/python-keylime
+
+
+    echo "===========create docker images========="
+    DOCKERFILE_TYPE=fedora ~/rust-keylime/docker/release/build_locally.sh 
+    ~/keylime/docker/release/build_locally.sh
+    
+
+  SHELL
+end

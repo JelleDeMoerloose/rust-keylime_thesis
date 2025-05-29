@@ -5,3 +5,9 @@ tpmdata.json
 tests/.tmp*
 tests/actions/__pycache__
 tests/unzipped/__pycache__
+
+
+vagrant/.vagrant/
+
+
+.env
